@@ -14,9 +14,17 @@ import io
 
 # 导入并应用ddddocr补丁
 from captcha_recognizer.utils.ddddocr_patch import apply_patches
+from captcha_recognizer.utils.cache import image_cache, cached_recognition
+from captcha_recognizer.utils.errors import (
+    handle_exception, UnsupportedCaptchaTypeError, InvalidImageError,
+    RecognitionFailedError
+)
+from captcha_recognizer.utils.logging_config import LoggerMixin, log_function_call
+from captcha_recognizer.utils.performance import monitor_performance
+from captcha_recognizer.utils.config import config
 apply_patches()
 
-class CaptchaRecognizer:
+class CaptchaRecognizer(LoggerMixin):
     """
     验证码识别器核心类
     支持文字验证码和计算类验证码的识别
@@ -32,6 +40,12 @@ class CaptchaRecognizer:
             ocr_kwargs: ddddocr OCR初始化参数
             det_kwargs: ddddocr检测器初始化参数
         """
+        # 从配置获取默认参数
+        recognition_config = config.get_section('recognition')
+        self.max_image_size = recognition_config.get('max_image_size', 16 * 1024 * 1024)
+        self.supported_formats = recognition_config.get('supported_formats', ['png', 'jpg', 'jpeg', 'gif'])
+        self.timeout = recognition_config.get('timeout', 30.0)
+
         # 默认参数
         if ocr_kwargs is None:
             ocr_kwargs = {}
@@ -49,6 +63,16 @@ class CaptchaRecognizer:
         # 注册处理器
         self._processors = {}
         self._register_default_processors()
+
+        self.logger.info(
+            "验证码识别器初始化完成",
+            extra={
+                'max_image_size': self.max_image_size,
+                'supported_formats': self.supported_formats,
+                'timeout': self.timeout,
+                'event_type': 'recognizer_initialized'
+            }
+        )
 
     def _register_default_processors(self):
         """注册默认的验证码处理器"""
@@ -70,6 +94,9 @@ class CaptchaRecognizer:
         """
         self._processors[processor_type] = processor
 
+    @handle_exception
+    @log_function_call
+    @monitor_performance(include_args=True, log_slow_calls=True, slow_threshold=2.0)
     def recognize(self,
                   image: Union[str, bytes, Image.Image],
                   captcha_type: str = 'text',
@@ -86,19 +113,129 @@ class CaptchaRecognizer:
             识别结果字符串
 
         Raises:
-            ValueError: 如果验证码类型不支持
-            FileNotFoundError: 如果图片文件不存在
+            UnsupportedCaptchaTypeError: 如果验证码类型不支持
+            InvalidImageError: 如果图片数据无效
+            RecognitionFailedError: 如果识别失败
         """
+        # 记录识别请求开始
+        self.logger.info(
+            "开始验证码识别",
+            extra={
+                'captcha_type': captcha_type,
+                'image_type': type(image).__name__,
+                'kwargs': kwargs,
+                'event_type': 'recognition_start'
+            }
+        )
+
         # 检查处理器是否存在
         if captcha_type not in self._processors:
-            raise ValueError(f"不支持的验证码类型: {captcha_type}，支持的类型: {list(self._processors.keys())}")
+            self.logger.error(
+                "不支持的验证码类型",
+                extra={
+                    'captcha_type': captcha_type,
+                    'supported_types': list(self._processors.keys()),
+                    'event_type': 'unsupported_type'
+                }
+            )
+            raise UnsupportedCaptchaTypeError(captcha_type, list(self._processors.keys()))
 
         # 准备图像数据
-        img_data = self._prepare_image(image)
+        try:
+            img_data = self._prepare_image(image)
+            self.logger.debug(
+                "图像数据准备完成",
+                extra={
+                    'image_size': len(img_data),
+                    'event_type': 'image_prepared'
+                }
+            )
+        except Exception as e:
+            self.logger.error(
+                "图像数据处理失败",
+                extra={
+                    'error': str(e),
+                    'image_type': type(image).__name__,
+                    'event_type': 'image_preparation_failed'
+                }
+            )
+            raise InvalidImageError(f"图像数据处理失败: {str(e)}")
 
-        # 使用对应的处理器处理验证码
-        processor = self._processors[captcha_type]
-        result = processor.process(img_data, **kwargs)
+        # 尝试从缓存获取结果
+        image_hash = image_cache.get_image_hash(img_data)
+        cached_result = image_cache.get(image_hash)
+
+        if cached_result and cached_result.get('captcha_type') == captcha_type:
+            # 检查参数是否匹配
+            kwargs_hash = hash(str(sorted(kwargs.items())))
+            if cached_result.get('kwargs_hash') == kwargs_hash:
+                self.logger.info(
+                    "缓存命中，返回缓存结果",
+                    extra={
+                        'image_hash': image_hash,
+                        'captcha_type': captcha_type,
+                        'event_type': 'cache_hit'
+                    }
+                )
+                return cached_result['result']
+
+        # 缓存未命中，使用对应的处理器处理验证码
+        self.logger.info(
+            "缓存未命中，开始识别处理",
+            extra={
+                'image_hash': image_hash,
+                'captcha_type': captcha_type,
+                'event_type': 'cache_miss'
+            }
+        )
+
+        try:
+            processor = self._processors[captcha_type]
+            result = processor.process(img_data, **kwargs)
+
+            if not result:
+                self.logger.warning(
+                    "识别结果为空",
+                    extra={
+                        'image_hash': image_hash,
+                        'captcha_type': captcha_type,
+                        'event_type': 'empty_result'
+                    }
+                )
+                raise RecognitionFailedError("识别结果为空")
+
+        except Exception as e:
+            self.logger.error(
+                "验证码识别失败",
+                extra={
+                    'image_hash': image_hash,
+                    'captcha_type': captcha_type,
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'event_type': 'recognition_failed'
+                }
+            )
+            if isinstance(e, RecognitionFailedError):
+                raise
+            raise RecognitionFailedError(f"验证码识别过程中发生错误: {str(e)}")
+
+        # 将结果存入缓存
+        cache_entry = {
+            'result': result,
+            'captcha_type': captcha_type,
+            'kwargs_hash': hash(str(sorted(kwargs.items())))
+        }
+        image_cache.set(image_hash, cache_entry)
+
+        self.logger.info(
+            "验证码识别成功",
+            extra={
+                'image_hash': image_hash,
+                'captcha_type': captcha_type,
+                'result_length': len(result) if result else 0,
+                'event_type': 'recognition_success'
+            }
+        )
 
         return result
 

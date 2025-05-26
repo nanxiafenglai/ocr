@@ -192,7 +192,7 @@ OCR/
 class NewCaptchaProcessor:
     def __init__(self, ocr_engine):
         self.ocr = ocr_engine
-    
+
     def process(self, image_data, **kwargs):
         # 实现处理逻辑
         result = self.ocr.classification(image_data)
@@ -208,6 +208,16 @@ self.register_processor('new_type', NewCaptchaProcessor(self.ocr))
 
 可以在 `captcha_recognizer/utils/image_utils.py` 中添加新的图像预处理函数，然后在处理器中使用。
 
+## 开发规划
+
+项目提供了详细的开发和优化规划文档：
+
+- **[开发路线图](DEVELOPMENT_ROADMAP.md)** - 分阶段的开发计划和时间安排
+- **[优化指南](OPTIMIZATION_GUIDE.md)** - 详细的性能和代码优化方案
+- **[架构升级计划](ARCHITECTURE_PLAN.md)** - 微服务架构迁移方案
+
+这些文档为项目的长期发展提供了清晰的技术路线图。
+
 ## 贡献指南
 
 欢迎为项目做出贡献！请遵循以下步骤：
@@ -217,6 +227,8 @@ self.register_processor('new_type', NewCaptchaProcessor(self.ocr))
 3. 提交更改 (`git commit -m 'Add some feature'`)
 4. 推送到分支 (`git push origin feature/your-feature`)
 5. 创建 Pull Request
+
+在开始开发前，建议阅读[开发路线图](DEVELOPMENT_ROADMAP.md)了解项目的发展方向。
 
 ## 许可证
 
